@@ -1,3 +1,14 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0" # You can bump to the latest major version
+    }
+  }
+
+  required_version = ">= 1.3.0" # Optional: sets minimum Terraform CLI version
+}
+
 provider "aws" {
   region  = var.region
   profile = "myprofile"
@@ -70,10 +81,10 @@ resource "aws_db_instance" "postgres_rds" {
 }
 
 // AWS SSM Parameter Store for env variables
-resource "aws_ssm_parameter" "db_url" {
-  name  = "SPRING_DATASOURCE_URL"
+resource "aws_ssm_parameter" "db_host" {
+  name  = "SPRING_DATASOURCE_HOST"
   type  = "SecureString"
-  value = "jdbc:postgresql://${aws_db_instance.postgres_rds.address}:5432/${var.db_name}"
+  value = aws_db_instance.postgres_rds.address
 }
 
 resource "aws_ssm_parameter" "db_username" {
@@ -86,6 +97,30 @@ resource "aws_ssm_parameter" "db_password" {
   name  = "SPRING_DATASOURCE_PASSWORD"
   type  = "SecureString"
   value = var.db_password
+}
+
+resource "aws_ssm_parameter" "dockerhub_username" {
+  name  = "DOCKERHUB_USERNAME"
+  type  = "SecureString"
+  value = var.dockerhub_username
+}
+
+resource "aws_ssm_parameter" "dockerhub_password" {
+  name  = "DOCKERHUB_PASSWORD"
+  type  = "SecureString"
+  value = var.dockerhub_password
+}
+
+resource "aws_ssm_parameter" "vm_ssh_user" {
+  name  = "VM_SSH_USER"
+  type  = "SecureString"
+  value = var.vm_ssh_user
+}
+
+resource "aws_ssm_parameter" "jenkins_admin_password" {
+  name  = "JENKINS_ADMIN_PASSWORD"
+  type  = "SecureString"
+  value = var.jenkins_admin_password
 }
 
 // Creates an IAM Role for EC2 instance
@@ -122,9 +157,15 @@ resource "aws_iam_policy" "ssm_read_policy" {
         "Action": [
           "ssm:GetParameter",
           "ssm:GetParameters",
-          "ssm:GetParametersByPath"
+          "ssm:GetParametersByPath",
+          "s3:GetObject"
         ],
-        "Resource": "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/SPRING_DATASOURCE_*"
+        "Resource": [
+          "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/SPRING_DATASOURCE_*",
+          "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/DOCKERHUB_*",
+          "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/JENKINS_ADMIN_PASSWORD",
+          "arn:aws:s3:::my-jenkins-config-bucket/jenkins.yaml"
+          ]
       }
     ]
   }
@@ -152,58 +193,55 @@ resource "aws_instance" "jenkins_server" {
 
   iam_instance_profile = aws_iam_instance_profile.jenkins_instance_profile.name
 
+  user_data = file("${path.module}/bootstrap.sh")
+
   tags = {
     name = "Jenkins-Server"
   }
-
-  user_data = <<-EOF
-                #!/bin/bash
-                sudo yum update -y
-              
-                # Install Jenkins, Docker, Java
-                sudo amazon-linux-extras enable corretto17
-                sudo yum install -y java-17-amazon-corretto git docker
-                sudo systemctl start docker
-                sudo systemctl enable docker
-                sudo usermod -aG docker ec2-user
-
-                # Wait to avoid conflicts
-                sleep 30  
-
-                # Install Jenkins GPG key manually
-                sudo rpm --import https://pkg.jenkins.io/redhat/jenkins.io.key || { echo "Failed to import Jenkins key"; exit 1; }
-                
-                # Install Jenkins
-                echo "Installing Jenkins..."
-                sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat/jenkins.repo || { echo "Failed to download Jenkins repo"; exit 1; }
-                sudo rpm --import https://pkg.jenkins.io/redhat/jenkins.io.key || { echo "Failed to import Jenkins key"; exit 1; }
-                sudo yum install -y jenkins || { echo "Failed to install Jenkins"; exit 1; }
-
-                # Start Jenkins and enable it to start on boot
-                echo "Starting Jenkins..."
-                sudo systemctl start jenkins || { echo "Failed to start Jenkins"; exit 1; }
-                sudo systemctl enable jenkins || { echo "Failed to enable Jenkins"; exit 1; }
-
-                # Verify Jenkins installation and log status
-                echo "Verifying Jenkins installation..."
-                sudo systemctl status jenkins >> /var/log/user-data.log 2>&1
-
-                # Fetch environment variables from AWS SSM Parameter Store
-                SPRING_DATASOURCE_URL=$(aws ssm get-parameter --name "SPRING_DATASOURCE_URL" --with-decryption --query "Parameter.Value" --output text)
-                SPRING_DATASOURCE_USERNAME=$(aws ssm get-parameter --name "SPRING_DATASOURCE_USERNAME" --with-decryption --query "Parameter.Value" --output text)
-                SPRING_DATASOURCE_PASSWORD=$(aws ssm get-parameter --name "SPRING_DATASOURCE_PASSWORD" --with-decryption --query "Parameter.Value" --output text)
-
-                # Persist Environment Variables
-                echo "SPRING_DATASOURCE_URL=$SPRING_DATASOURCE_URL" | sudo tee -a /etc/environment
-                echo "SPRING_DATASOURCE_USERNAME=$SPRING_DATASOURCE_USERNAME" | sudo tee -a /etc/environment
-                echo "SPRING_DATASOURCE_PASSWORD=$SPRING_DATASOURCE_PASSWORD" | sudo tee -a /etc/environment
-
-                # Reload environment variables
-                source /etc/environment
-
-            EOF
 }
 
 output "public_ip" {
   value = aws_instance.jenkins_server.public_ip
 }
+
+// ===============================
+# JCasC TEMPLATE FILE RENDERING
+// ===============================
+resource "null_resource" "render_jenkins_yaml" {
+  depends_on = [aws_instance.jenkins_server]
+
+  provisioner "local-exec" {
+    command = "envsubst < ${path.module}/jenkins.yaml.tpl > ${path.module}/jenkins.yaml"
+    environment = {
+      admin_password             = var.jenkins_admin_password
+      dockerhub_username         = var.dockerhub_username
+      dockerhub_password         = var.dockerhub_password
+      public_ip                  = aws_instance.jenkins_server.public_ip
+      SPRING_DATASOURCE_HOST     = aws_db_instance.postgres_rds.address
+      SPRING_DATASOURCE_USERNAME = var.db_user
+      SPRING_DATASOURCE_PASSWORD = var.db_password
+      SPRING_DATASOURCE_DBNAME   = var.db_name
+    }
+
+  }
+}
+
+// Create the final JCasC file after instance creation
+resource "local_file" "jenkins_yaml" {
+  depends_on = [null_resource.render_jenkins_yaml]
+  content    = file("${path.module}/jenkins.yaml")
+  filename   = "${path.module}/jenkins.yaml"
+}
+
+resource "aws_s3_bucket" "jenkins_bucket" {
+  bucket = "my-jenkins-config-bucket"
+}
+
+resource "aws_s3_bucket_object" "jenkins_yaml" {
+  bucket       = aws_s3_bucket.jenkins_bucket.id
+  key          = "jenkins.yaml"
+  source       = local_file.jenkins_yaml.filename
+  content_type = "text/yaml"
+  acl          = "private"
+}
+

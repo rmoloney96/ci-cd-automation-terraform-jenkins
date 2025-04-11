@@ -1,0 +1,78 @@
+jenkins:
+  systemMessage: "Welcome to Jenkins, configured via JCasC!"
+  
+  # Security Realm - Admin user configuration
+  securityRealm:
+    local:
+      users:
+        - username: "admin"
+          password: "${admin_password}"
+
+  # Jenkins URL
+  jenkinsUrl: "http://${public_ip}:8080/"
+
+  # SCM Configuration (e.g., GitHub, GitLab, Bitbucket, etc.)
+  scm:
+    git:
+      server:
+        url: "https://github.com"
+      
+  # DockerHub credentials
+  credentials:
+    - id: "dockerhub"
+      username: "${dockerhub_username}"
+      password: "${dockerhub_password}"
+      description: "DockerHub Credentials"
+      scope: GLOBAL
+
+  # Configure Jenkins plugins and other settings here
+  configurationAsCode:
+    plugins:
+      - "git"
+      - "docker-workflow"
+      - "docker-build-publish"
+      - "blueocean"
+
+  # Configure Jenkins pipeline job templates, etc.
+  jobs:
+    - script: |
+        pipeline {
+            agent any
+            environment {
+                DB_HOST = "${SPRING_DATASOURCE_HOST}"
+                DB_USER = "${SPRING_DATASOURCE_USERNAME}"
+                DB_PASSWORD = "${SPRING_DATASOURCE_PASSWORD}"
+                DB_NAME = "${SPRING_DATASOURCE_DBNAME}"
+            }
+            stages {
+                stage('Clone') {
+                    steps {
+                        git 'https://github.com/robmoloney96/spring-boot-api.git'
+                    }
+                }
+                stage('Build Docker Image') {
+                    steps {
+                        script {
+                            docker.build("spring_boot_app")
+                        }
+                    }
+                }
+                stage('Push to DockerHub') {
+                    steps {
+                        script {
+                            docker.withRegistry('https://index.docker.io/v1/', 'dockerhub') {
+                                docker.image('spring_boot_app').push('latest')
+                            }
+                        }
+                    }
+                }
+                stage('Deploy to Docker') {
+                    steps {
+                        script {
+                            // Pull and deploy the Docker image
+                            sh 'docker-compose -f docker-compose.yml up -d'
+                        }
+                    }
+                }
+            }
+        }

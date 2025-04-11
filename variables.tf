@@ -37,3 +37,24 @@ variable "key_name" {
   description = "SSH key for EC2 instance"
   type        = string
 }
+
+variable "dockerhub_username" {
+  description = "DockerHub username"
+  type        = string
+}
+
+variable "dockerhub_password" {
+  description = "DockerHub password"
+  type        = string
+}
+
+variable "vm_ssh_user" {
+  description = "SSH username for Jenkins EC2 instance"
+  type        = string
+}
+
+variable "jenkins_admin_password" {
+  description = "Password for Jenkins admin user"
+  type        = string
+  sensitive   = true
+}
